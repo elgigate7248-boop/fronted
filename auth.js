@@ -30,6 +30,7 @@ function renderAuthNav() {
   const roles = getRoles(user);
   const canAdmin = roles.includes('ADMIN') || roles.includes('SUPER_ADMIN');
   const isVendedor = roles.includes('VENDEDOR');
+  const isRepartidor = roles.includes('REPARTIDOR');
 
   const linkMisPedidos = document.querySelector('a[href="mis-pedidos.html"]');
   if (linkMisPedidos) {
@@ -71,9 +72,15 @@ function renderAuthNav() {
     }
   }
   
-  // Panel de vendedor (solo VENDEDORES)
+  // Panel de vendedor (VENDEDOR y REPARTIDOR)
   if (vendedorNav) {
-    vendedorNav.style.display = logged && isVendedor ? '' : 'none';
+    vendedorNav.style.display = logged && (isVendedor || isRepartidor) ? '' : 'none';
+  }
+  
+  // Panel de repartidor (solo REPARTIDOR)
+  const repartidorNav = document.getElementById('navRepartidor');
+  if (repartidorNav) {
+    repartidorNav.style.display = logged && isRepartidor ? '' : 'none';
   }
   
   if (userName) userName.textContent = logged ? (user.nombre || user.email || 'Mi cuenta') : '';
