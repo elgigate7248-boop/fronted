@@ -72,9 +72,9 @@ function renderAuthNav() {
     }
   }
   
-  // Panel de vendedor (VENDEDOR y REPARTIDOR)
+  // Panel de vendedor (VENDEDOR)
   if (vendedorNav) {
-    vendedorNav.style.display = logged && (isVendedor) ? '' : 'none';
+    vendedorNav.style.display = logged && isVendedor ? '' : 'none';
   }
   
   // Panel de repartidor (solo REPARTIDOR)
