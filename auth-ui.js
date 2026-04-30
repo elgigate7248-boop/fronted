@@ -56,8 +56,19 @@ function renderAuthNav() {
     const showPanel = logged && (canAdmin || isRepartidor);
     adminNav.style.display = showPanel ? '' : 'none';
     if (logged && canAdmin) {
-      const vendedorItem = roles.includes('VENDEDOR') || roles.includes('SUPER_ADMIN')
+      const isAdmin = roles.includes('ADMIN') || roles.includes('SUPER_ADMIN');
+      const isVendedor = roles.includes('VENDEDOR') || roles.includes('SUPER_ADMIN');
+      const vendedorItem = isVendedor
         ? '<li><a class="dropdown-item" href="vendedor.html">Panel de Vendedor</a></li><li><hr class="dropdown-divider"></li>'
+        : '';
+      // Analytics links condicionados por rol
+      const analyticsItems = [];
+      if (isAdmin) analyticsItems.push('<li><a class="dropdown-item" href="dashboard/dashboard-admin.html"><i class="fas fa-tachometer-alt me-2"></i>Dashboard Admin</a></li>');
+      if (isVendedor) analyticsItems.push('<li><a class="dropdown-item" href="dashboard/dashboard-vendedor.html"><i class="fas fa-chart-bar me-2"></i>Dashboard Vendedor</a></li>');
+      const analyticsSection = analyticsItems.length > 0
+        ? `<li><hr class="dropdown-divider"></li>
+           <li><h6 class="dropdown-header"><i class="fas fa-chart-line me-1"></i> Analytics</h6></li>
+           ${analyticsItems.join('')}`
         : '';
       adminNav.innerHTML = `
         <div class="dropdown d-inline-block">
@@ -76,9 +87,7 @@ function renderAuthNav() {
             <li><a class="dropdown-item" href="admin.html#usuarios">Usuarios</a></li>
             <li><a class="dropdown-item" href="admin.html#pedidos">Pedidos</a></li>
             <li><a class="dropdown-item" href="admin.html#roles">Roles</a></li>
-            <li><hr class="dropdown-divider"></li>
-            <li><h6 class="dropdown-header"><i class="fas fa-chart-line me-1"></i> Analytics</h6></li>
-            <li><a class="dropdown-item" href="dashboard/dashboard-admin.html"><i class="fas fa-tachometer-alt me-2"></i>Dashboard Admin</a></li>
+            ${analyticsSection}
           </ul>
         </div>
       `;
