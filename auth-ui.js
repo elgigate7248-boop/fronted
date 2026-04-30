@@ -76,6 +76,9 @@ function renderAuthNav() {
             <li><a class="dropdown-item" href="admin.html#usuarios">Usuarios</a></li>
             <li><a class="dropdown-item" href="admin.html#pedidos">Pedidos</a></li>
             <li><a class="dropdown-item" href="admin.html#roles">Roles</a></li>
+            <li><hr class="dropdown-divider"></li>
+            <li><h6 class="dropdown-header"><i class="fas fa-chart-line me-1"></i> Analytics</h6></li>
+            <li><a class="dropdown-item" href="dashboard/dashboard-admin.html"><i class="fas fa-tachometer-alt me-2"></i>Dashboard Admin</a></li>
           </ul>
         </div>
       `;
