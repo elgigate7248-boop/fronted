@@ -81,6 +81,21 @@ let ventasChartInstance = null;
 let productosChartInstance = null;
 let pedidosCargados = false;
 
+const ESTADOS_PEDIDO = [
+  { id: 1, nombre: 'Pendiente' },
+  { id: 2, nombre: 'Confirmado' },
+  { id: 3, nombre: 'Preparando' },
+  { id: 4, nombre: 'En camino' },
+  { id: 5, nombre: 'Entregado' },
+  { id: 6, nombre: 'Cancelado' }
+];
+
+const TRANSICIONES_VENDEDOR = {
+  1: [2, 6],
+  2: [3, 6],
+  3: [4]
+};
+
 // Cargar información del vendedor
 async function cargarInfoVendedor() {
   try {
@@ -304,9 +319,11 @@ function renderPedidos(pedidos) {
 
 function getEstadoBadgeClass(estado) {
   switch (estado?.toLowerCase()) {
-    case 'completado': return 'success';
-    case 'enviado': return 'info';
-    case 'procesando': return 'warning';
+    case 'pendiente': return 'warning';
+    case 'confirmado': return 'info';
+    case 'preparando': case 'preparando pedido': return 'primary';
+    case 'en camino': return 'info';
+    case 'entregado': return 'success';
     case 'cancelado': return 'danger';
     default: return 'secondary';
   }
@@ -321,7 +338,7 @@ function actualizarEstadisticasProductos(productos) {
 // Actualizar estadísticas de pedidos
 function actualizarEstadisticasPedidos(pedidos) {
   const ingresos = pedidos.reduce((sum, p) => sum + parseFloat(p.total || 0), 0);
-  const activos = pedidos.filter(p => ['pendiente','procesando','enviado'].includes((p.estado || '').toLowerCase())).length;
+  const activos = pedidos.filter(p => ['pendiente','confirmado','preparando','preparando pedido','en camino'].includes((p.estado || '').toLowerCase())).length;
 
   const ventasEl = document.getElementById('ventasMes');
   const ingresosEl = document.getElementById('ingresosMes');
@@ -459,18 +476,16 @@ async function verPedido(id) {
     const res = await fetchAuth(`/pedido/${id}`);
     if (!res.ok) throw new Error('Error al cargar pedido');
     const pedido = await res.json();
-    
-    const ESTADOS_PEDIDO = [
-      { id: 1, nombre: 'Pendiente' },
-      { id: 2, nombre: 'Pagado' },
-      { id: 3, nombre: 'Enviado' },
-      { id: 4, nombre: 'Entregado' },
-      { id: 5, nombre: 'Cancelado' }
-    ];
 
-    const opcionesEstado = ESTADOS_PEDIDO.map(e =>
-      `<option value="${e.id}" ${e.id === pedido.id_estado ? 'selected' : ''}>${e.nombre}</option>`
-    ).join('');
+    const estadoActual = Number(pedido.id_estado || 0);
+    const estadosPermitidos = TRANSICIONES_VENDEDOR[estadoActual] || [];
+    const opcionesEstado = estadosPermitidos.length
+      ? estadosPermitidos
+        .map((idEstado) => ESTADOS_PEDIDO.find((estado) => estado.id === idEstado))
+        .filter(Boolean)
+        .map((estado) => `<option value="${estado.id}">${estado.nombre}</option>`)
+        .join('')
+      : '<option value="">Sin cambios disponibles</option>';
 
     // Mostrar detalles en modal
     const detallesHtml = `
@@ -491,10 +506,10 @@ async function verPedido(id) {
       <hr>
       <h6><i class="fas fa-exchange-alt me-1"></i>Cambiar Estado del Pedido</h6>
       <div class="d-flex gap-2 align-items-center mb-3">
-        <select class="form-select form-select-sm" id="selectEstadoPedido" style="max-width:200px;">
+        <select class="form-select form-select-sm" id="selectEstadoPedido" style="max-width:200px;" ${estadosPermitidos.length ? '' : 'disabled'}>
           ${opcionesEstado}
         </select>
-        <button class="btn btn-sm btn-primary" id="btnCambiarEstado" onclick="cambiarEstadoPedido(${pedido.id_pedido})">
+        <button class="btn btn-sm btn-primary" id="btnCambiarEstado" onclick="cambiarEstadoPedido(${pedido.id_pedido})" ${estadosPermitidos.length ? '' : 'disabled'}>
           <i class="fas fa-save me-1"></i>Guardar
         </button>
       </div>
@@ -526,9 +541,10 @@ async function verPedido(id) {
     
     document.getElementById('pedidoDetalles').innerHTML = detallesHtml;
 
+    // Show/hide factura button (available when pedido is confirmed or beyond)
     const btnFactura = document.getElementById('btnVerFactura');
     if (btnFactura) {
-      btnFactura.style.display = (pedido.id_estado >= 2) ? 'inline-block' : 'none';
+      btnFactura.style.display = estadoActual >= 2 ? 'inline-block' : 'none';
     }
 
     const modal = new bootstrap.Modal(document.getElementById('modalPedido'));
@@ -545,6 +561,11 @@ async function cambiarEstadoPedido(idPedido) {
   if (!select) return;
 
   const nuevoEstado = parseInt(select.value);
+  if (!Number.isFinite(nuevoEstado)) {
+    showToast('Este pedido no tiene cambios de estado disponibles para vendedor', 'info');
+    return;
+  }
+
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Guardando...';
 
@@ -823,6 +844,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('estadisticas-tab')?.addEventListener('shown.bs.tab', () => inicializarGraficos());
   document.getElementById('inventario-tab')?.addEventListener('shown.bs.tab', () => inicializarInventario());
+  document.getElementById('inteligencia-tab')?.addEventListener('shown.bs.tab', () => inicializarInteligencia());
 });
 
 // Validación de formularios con clases Bootstrap is-invalid
@@ -1004,6 +1026,8 @@ async function registrarEntradaInventario() {
   }
 }
 
+// ── Factura ──
+
 async function verFacturaPedido() {
   if (!pedidoActualId) return;
 
@@ -1045,7 +1069,7 @@ async function verFacturaPedido() {
                 <th class="text-end">Costo Compra</th>
                 <th class="text-end">P. Venta</th>
                 <th class="text-end">Subtotal</th>
-                <th class="text-end">Comision</th>
+                <th class="text-end">Comisi&oacute;n</th>
                 <th class="text-end">Ganancia Neta</th>
               </tr>
             </thead>
@@ -1085,7 +1109,7 @@ async function verFacturaPedido() {
           </div>
           <div class="col-md-4">
             <div class="p-2 rounded" style="background:rgba(255,193,7,0.15);">
-              <small class="text-muted d-block">Comision Plataforma</small>
+              <small class="text-muted d-block">Comisi&oacute;n Plataforma</small>
               <strong class="text-warning">-$${Number(data.totales.total_comision).toFixed(2)}</strong>
             </div>
           </div>
@@ -1106,11 +1130,451 @@ async function verFacturaPedido() {
 }
 
 function cambiarPassword() {
-  showToast('Funcionalidad de cambiar contrasena en desarrollo', 'info');
+  showToast('Funcionalidad de cambiar contrase\u00f1a en desarrollo', 'info');
 }
 function exportarDatos() {
   showToast('Funcionalidad de exportar datos en desarrollo', 'info');
 }
 function verAyuda() {
   showToast('Funcionalidad de ayuda en desarrollo', 'info');
+}
+
+// ══════════════════════════════════════════════════
+// INTELIGENCIA DE NEGOCIO
+// ══════════════════════════════════════════════════
+
+let biData = null;
+let biCargado = false;
+
+function inicializarInteligencia() {
+  // Fecha por defecto: últimos 30 días
+  const hoy = new Date();
+  const hace30 = new Date(Date.now() - 30 * 86400000);
+  const inputFin = document.getElementById('biFechaFin');
+  const inputIni = document.getElementById('biFechaInicio');
+  if (inputFin) inputFin.value = hoy.toISOString().slice(0, 10);
+  if (inputIni) inputIni.value = hace30.toISOString().slice(0, 10);
+
+  // Poblar selector del simulador
+  poblarSelectSimulador();
+
+  if (!biCargado) {
+    cargarInteligenciaNegocio();
+  }
+}
+
+function poblarSelectSimulador() {
+  const select = document.getElementById('simProducto');
+  if (!select || !productosData.length) return;
+  select.innerHTML = '<option value="">Selecciona producto</option>' +
+    productosData.map(p =>
+      `<option value="${p.id_producto}">${escapeHtml(p.nombre)} ($${parseFloat(p.precio || 0).toFixed(2)})</option>`
+    ).join('');
+}
+
+async function cargarInteligenciaNegocio() {
+  const fechaIni = document.getElementById('biFechaInicio')?.value || '';
+  const fechaFin = document.getElementById('biFechaFin')?.value || '';
+
+  // Mostrar loading en recomendaciones
+  const recList = document.getElementById('biRecomendacionesList');
+  if (recList) {
+    recList.innerHTML = `
+      <div class="text-center py-4">
+        <div class="spinner-border spinner-border-sm me-2"></div>
+        <span class="text-muted">Analizando tu negocio...</span>
+      </div>
+    `;
+  }
+
+  try {
+    let url = '/reportes/vendedor/inteligencia-negocio?';
+    if (fechaIni) url += `fecha_inicio=${fechaIni}&`;
+    if (fechaFin) url += `fecha_fin=${fechaFin}&`;
+
+    const res = await fetchAuth(url);
+    if (!res.ok) throw new Error('Error al cargar inteligencia de negocio');
+    const json = await res.json();
+    biData = json.data;
+    biCargado = true;
+
+    renderInteligenciaNegocio(biData);
+  } catch (err) {
+    console.error('Error inteligencia de negocio:', err);
+    if (recList) {
+      recList.innerHTML = `
+        <div class="alert alert-warning mb-0">
+          <i class="fas fa-exclamation-triangle me-2"></i>${escapeHtml(err.message)}
+        </div>
+      `;
+    }
+  }
+}
+
+function renderInteligenciaNegocio(data) {
+  if (!data) return;
+
+  // Período info
+  const periodoEl = document.getElementById('biPeriodoInfo');
+  if (periodoEl && data.periodo) {
+    periodoEl.textContent = `${data.periodo.fecha_inicio} → ${data.periodo.fecha_fin} (${data.periodo.dias} días)`;
+  }
+
+  // KPIs
+  renderBIKpis(data);
+
+  // Alertas
+  renderBIAlertas(data.alertas || []);
+
+  // Recomendaciones
+  renderBIRecomendaciones(data.recomendaciones || []);
+
+  // Insights
+  renderBIInsights(data.insights || []);
+
+  // Matriz Estratégica
+  renderBIMatriz(data.matriz_estrategica || []);
+
+  // Segmentación ABC
+  renderBIABC(data.segmentacion || []);
+
+  // Rotación
+  renderBIRotacion(data.metricas_avanzadas?.rotacion_productos || []);
+
+  // Cross-Selling
+  renderBICrossSelling(data.cross_selling || []);
+}
+
+function renderBIKpis(data) {
+  const ma = data.metricas_avanzadas || {};
+  const el = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+
+  el('biCapitalInmovilizado', '$' + Number(ma.capital_inmovilizado || 0).toLocaleString('es-CO', { minimumFractionDigits: 2 }));
+  el('biProductosConVentas', ma.productos_con_ventas || 0);
+  el('biProductosSinVentas', ma.productos_sin_ventas || 0);
+  el('biTotalAlertas', (data.alertas || []).length);
+}
+
+function renderBIAlertas(alertas) {
+  const container = document.getElementById('biAlertasContainer');
+  const list = document.getElementById('biAlertasList');
+  if (!container || !list) return;
+
+  if (!alertas.length) {
+    container.style.display = 'none';
+    return;
+  }
+
+  container.style.display = 'block';
+  list.innerHTML = alertas.map(a => {
+    const nivel = a.nivel || (a.prioridad === 'alta' ? 'critico' : 'medio');
+    return `
+      <div class="bi-alerta ${nivel}">
+        <span class="bi-alerta-icono">${a.icono || '⚠️'}</span>
+        <div class="bi-alerta-contenido">
+          <div class="bi-alerta-mensaje">${escapeHtml(a.mensaje)}</div>
+          ${a.accion ? `<span class="badge bg-danger bi-alerta-accion"><i class="fas fa-bolt me-1"></i>${escapeHtml(a.accion)}</span>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderBIRecomendaciones(recs) {
+  const list = document.getElementById('biRecomendacionesList');
+  const countEl = document.getElementById('biTotalRecomendaciones');
+  if (!list) return;
+  if (countEl) countEl.textContent = recs.length;
+
+  if (!recs.length) {
+    list.innerHTML = `
+      <div class="text-center text-muted py-4">
+        <i class="fas fa-check-circle fa-2x mb-2 d-block text-success opacity-75"></i>
+        <strong>¡Todo en orden!</strong> No hay recomendaciones pendientes.
+      </div>
+    `;
+    return;
+  }
+
+  list.innerHTML = recs.map(r => {
+    const prioridadClass = `prioridad-${r.prioridad || 'baja'}`;
+    const prioridadBadge = r.prioridad === 'alta'
+      ? '<span class="badge bg-danger ms-2">Alta</span>'
+      : r.prioridad === 'media'
+        ? '<span class="badge bg-warning text-dark ms-2">Media</span>'
+        : '<span class="badge bg-info ms-2">Baja</span>';
+
+    return `
+      <div class="bi-rec-card ${prioridadClass}">
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <div class="mb-1" style="color: rgba(255,255,255,0.9); font-size: 0.9rem;">
+              ${escapeHtml(r.mensaje)}
+            </div>
+            <div>
+              ${r.producto ? `<span class="bi-badge bi-badge-oportunidad">${escapeHtml(r.producto)}</span>` : ''}
+              ${prioridadBadge}
+              <span class="badge bg-secondary ms-1">${escapeHtml(r.tipo || '')}</span>
+            </div>
+          </div>
+          ${r.accion ? `
+            <button class="btn btn-sm btn-outline-light flex-shrink-0 ms-3" 
+                    onclick="showToast('Acción: ${escapeHtml(r.accion)}', 'info')" 
+                    title="${escapeHtml(r.accion)}">
+              <i class="fas fa-arrow-right"></i>
+            </button>
+          ` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderBIInsights(insights) {
+  const container = document.getElementById('biInsightsContainer');
+  const list = document.getElementById('biInsightsList');
+  if (!container || !list) return;
+
+  if (!insights.length) {
+    container.style.display = 'none';
+    return;
+  }
+
+  container.style.display = 'block';
+  const nivelIcono = { critico: 'fa-exclamation-circle text-danger', positivo: 'fa-check-circle text-success', informativo: 'fa-info-circle text-info' };
+  const nivelClase = { critico: 'critico', positivo: 'positivo', informativo: 'informativo' };
+
+  list.innerHTML = insights.map(ins => `
+    <div class="col-md-4">
+      <div class="bi-insight-card">
+        <h6>
+          <i class="fas ${nivelIcono[ins.nivel] || 'fa-info-circle text-info'} me-2"></i>
+          ${escapeHtml(ins.titulo)}
+        </h6>
+        <p>${escapeHtml(ins.descripcion)}</p>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderBIMatriz(matriz) {
+  const body = document.getElementById('biMatrizBody');
+  if (!body) return;
+
+  if (!matriz.length) {
+    body.innerHTML = '<div class="text-center text-muted py-3 small">No hay datos de ventas para clasificar productos</div>';
+    return;
+  }
+
+  const catClass = { Estrella: 'estrella', Oportunidad: 'oportunidad', Optimizar: 'optimizar', Eliminar: 'eliminar' };
+
+  body.innerHTML = matriz.map(m => `
+    <div class="bi-matriz-item">
+      <div>
+        <strong style="color: rgba(255,255,255,0.9);">${m.icono} ${escapeHtml(m.nombre)}</strong>
+        <div class="small" style="color: rgba(255,255,255,0.5);">${escapeHtml(m.accion_recomendada)}</div>
+      </div>
+      <div class="text-end">
+        <span class="bi-badge bi-badge-${catClass[m.categoria_estrategica] || 'optimizar'}">${escapeHtml(m.categoria_estrategica)}</span>
+        <div class="small mt-1" style="color: rgba(255,255,255,0.5);">
+          Margen: ${m.margen_pct}% · ${m.unidades_vendidas} uds
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderBIABC(segmentacion) {
+  const body = document.getElementById('biABCBody');
+  if (!body) return;
+
+  if (!segmentacion.length) {
+    body.innerHTML = '<div class="text-center text-muted py-3 small">No hay datos de ventas para segmentar</div>';
+    return;
+  }
+
+  // Resumen por categoría
+  const resumen = { A: { count: 0, ingresos: 0 }, B: { count: 0, ingresos: 0 }, C: { count: 0, ingresos: 0 } };
+  segmentacion.forEach(s => {
+    if (resumen[s.categoria]) {
+      resumen[s.categoria].count++;
+      resumen[s.categoria].ingresos += s.ingresos;
+    }
+  });
+
+  let html = `
+    <div class="d-flex gap-2 mb-3">
+      <span class="bi-badge bi-badge-a">A: ${resumen.A.count} productos (80% ingresos)</span>
+      <span class="bi-badge bi-badge-b">B: ${resumen.B.count} productos (15% ingresos)</span>
+      <span class="bi-badge bi-badge-c">C: ${resumen.C.count} productos (5% ingresos)</span>
+    </div>
+  `;
+
+  html += segmentacion.slice(0, 15).map(s => {
+    const catLower = s.categoria.toLowerCase();
+    return `
+      <div class="bi-matriz-item">
+        <div>
+          <span class="bi-badge bi-badge-${catLower} me-2">${s.categoria}</span>
+          <span style="color: rgba(255,255,255,0.9);">${escapeHtml(s.nombre)}</span>
+        </div>
+        <div class="text-end small" style="color: rgba(255,255,255,0.5);">
+          $${Number(s.ingresos).toLocaleString('es-CO')} (${s.pct_ingresos}%)
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  body.innerHTML = html;
+}
+
+function renderBIRotacion(productos) {
+  const tbody = document.getElementById('biRotacionBody');
+  if (!tbody) return;
+
+  if (!productos.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted small">Sin datos</td></tr>';
+    return;
+  }
+
+  // Ordenar: primero los lentos (más críticos)
+  const sorted = [...productos].sort((a, b) => {
+    const orden = { 'LENTO': 0, 'MEDIO': 1, 'RÁPIDO': 2 };
+    return (orden[a.clasificacion] || 1) - (orden[b.clasificacion] || 1);
+  });
+
+  tbody.innerHTML = sorted.slice(0, 15).map(p => {
+    const colorClass = p.color === 'verde' ? 'bi-rotacion-rapido'
+      : p.color === 'amarillo' ? 'bi-rotacion-medio'
+      : 'bi-rotacion-lento';
+    const indicador = p.color === 'verde' ? '🟢' : p.color === 'amarillo' ? '🟡' : '🔴';
+    const diasTxt = p.dias_promedio_stock !== null ? `${p.dias_promedio_stock}d` : '∞';
+
+    return `
+      <tr>
+        <td class="small">${escapeHtml(p.nombre)}</td>
+        <td>${p.stock}</td>
+        <td>${p.ventas_diarias}</td>
+        <td class="${colorClass} fw-bold">${diasTxt}</td>
+        <td><span class="${colorClass}">${indicador} ${p.clasificacion}</span></td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderBICrossSelling(crossSelling) {
+  const card = document.getElementById('biCrossSellingCard');
+  const body = document.getElementById('biCrossSellingBody');
+  if (!card || !body) return;
+
+  if (!crossSelling.length) {
+    card.style.display = 'none';
+    return;
+  }
+
+  card.style.display = 'block';
+
+  // Map product IDs to names
+  const nombreMap = new Map(productosData.map(p => [p.id_producto, p.nombre]));
+
+  body.innerHTML = crossSelling.map(cs => {
+    const nombre1 = nombreMap.get(cs.productos[0]) || `Producto #${cs.productos[0]}`;
+    const nombre2 = nombreMap.get(cs.productos[1]) || `Producto #${cs.productos[1]}`;
+    return `
+      <div class="bi-cross-item">
+        <div>
+          <i class="fas fa-link me-2 text-info"></i>
+          <strong>${escapeHtml(nombre1)}</strong>
+          <span class="mx-2 text-muted">+</span>
+          <strong>${escapeHtml(nombre2)}</strong>
+        </div>
+        <div>
+          <span class="badge bg-info">${cs.veces_juntos}x juntos</span>
+          <span class="badge bg-success ms-1">Crear combo</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// ── Simulador de Precios ──
+
+async function ejecutarSimulacion() {
+  const idProducto = document.getElementById('simProducto')?.value;
+  const variacion = document.getElementById('simVariacion')?.value;
+  const resultadoEl = document.getElementById('simResultado');
+
+  if (!idProducto || variacion === '' || variacion === undefined) {
+    showToast('Selecciona un producto y variación de precio', 'warning');
+    return;
+  }
+
+  resultadoEl.innerHTML = `
+    <div class="text-center py-3">
+      <div class="spinner-border spinner-border-sm me-2"></div>
+      <span class="text-muted small">Simulando...</span>
+    </div>
+  `;
+
+  try {
+    const res = await fetchAuth(`/reportes/vendedor/simular-precio?id_producto=${idProducto}&variacion=${variacion}`);
+    if (!res.ok) {
+      const err = await safeJson(res);
+      throw new Error(err?.error || 'Error en simulación');
+    }
+    const json = await res.json();
+    const d = json.data;
+
+    const diffClass = d.diferencia_ganancia >= 0 ? 'bi-sim-positivo' : 'bi-sim-negativo';
+    const diffIcon = d.diferencia_ganancia >= 0 ? 'fa-arrow-up' : 'fa-arrow-down';
+
+    resultadoEl.innerHTML = `
+      <div class="bi-sim-resultado">
+        <div class="mb-2 fw-bold" style="color: rgba(255,255,255,0.9);">
+          <i class="fas fa-calculator me-1"></i> ${escapeHtml(d.producto)}
+        </div>
+        <div class="bi-sim-row">
+          <span class="bi-sim-label">Precio actual</span>
+          <span class="bi-sim-value">$${Number(d.precio_actual).toFixed(2)}</span>
+        </div>
+        <div class="bi-sim-row">
+          <span class="bi-sim-label">Precio simulado (${d.variacion_precio_pct > 0 ? '+' : ''}${d.variacion_precio_pct}%)</span>
+          <span class="bi-sim-value">$${Number(d.precio_simulado).toFixed(2)}</span>
+        </div>
+        <div class="bi-sim-row">
+          <span class="bi-sim-label">Ventas actuales (30d)</span>
+          <span class="bi-sim-value">${d.ventas_actuales} uds</span>
+        </div>
+        <div class="bi-sim-row">
+          <span class="bi-sim-label">Ventas estimadas</span>
+          <span class="bi-sim-value ${d.ventas_estimadas > d.ventas_actuales ? 'bi-sim-positivo' : 'bi-sim-negativo'}">
+            ${d.ventas_estimadas} uds (${d.cambio_demanda_pct > 0 ? '+' : ''}${d.cambio_demanda_pct}%)
+          </span>
+        </div>
+        <div class="bi-sim-row">
+          <span class="bi-sim-label">Ganancia actual</span>
+          <span class="bi-sim-value">$${Number(d.ganancia_actual).toFixed(2)}</span>
+        </div>
+        <div class="bi-sim-row">
+          <span class="bi-sim-label">Ganancia estimada</span>
+          <span class="bi-sim-value ${diffClass}">
+            $${Number(d.ganancia_estimada).toFixed(2)}
+            <i class="fas ${diffIcon} ms-1"></i>
+          </span>
+        </div>
+        <div class="bi-sim-row" style="border-top: 2px solid rgba(255,255,255,0.15); margin-top: 4px; padding-top: 10px;">
+          <span class="bi-sim-label fw-bold">Diferencia</span>
+          <span class="bi-sim-value ${diffClass} fs-6">
+            ${d.diferencia_ganancia >= 0 ? '+' : ''}$${Number(d.diferencia_ganancia).toFixed(2)}
+          </span>
+        </div>
+        <div class="mt-2 small" style="color: rgba(255,255,255,0.4);">
+          <i class="fas fa-info-circle me-1"></i>${escapeHtml(d.nota)}
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    console.error('Error simulación:', err);
+    resultadoEl.innerHTML = `<div class="alert alert-warning mb-0 small">${escapeHtml(err.message)}</div>`;
+  }
 }
