@@ -1,522 +1,561 @@
-// ═══════════════════════════════════════════════════════════════════════
-// DASHBOARD VENDEDOR — Lógica principal (v2 — estados parciales, KPIs PRO)
-// ═══════════════════════════════════════════════════════════════════════
-;(function (global) {
-  'use strict';
+/**
+ * Dashboard Analítico de Vendedor — lógica principal
+ * Consume: GET /reportes/vendedor/productos-detalle
+ * Depende de: config.js (API_BASE), data-table.js, chart-factory.js, Bootstrap 5, Chart.js
+ */
 
-  const STORAGE_KEY = 'dash_vendedor_filters';
-  let dashData = {};
-  let tables = {};
-  let refreshTimer = null;
-  let lastActivity = Date.now();
+// ── Auth ─────────────────────────────────────────────────────────────────────
+const _token = localStorage.getItem('token');
+let   _user  = {};
+try { _user = JSON.parse(localStorage.getItem('user') || '{}'); } catch (_) {}
 
-  // ── Inicialización ──────────────────────────────────────────────────
+const _roles = Array.isArray(_user.roles)
+  ? _user.roles.map(r => r.nombre || r)
+  : (_user.rol ? [_user.rol] : []);
 
-  async function init() {
-    const token = ApiClient.getToken();
-    if (!token) { location.href = '../login.html'; return; }
+if (!_token) {
+  location.href = '../login.html';
+  throw new Error('Sin sesión');
+}
+if (!_roles.includes('VENDEDOR') && !_roles.includes('ADMIN') && !_roles.includes('SUPER_ADMIN')) {
+  location.href = '../index.html';
+  throw new Error('Sin permisos');
+}
 
-    const roles = ApiClient.getRoles();
-    if (!roles.includes('VENDEDOR') && !roles.includes('ADMIN') && !roles.includes('SUPER_ADMIN')) {
-      location.href = '../index.html';
-      return;
-    }
+// ── Estado global ─────────────────────────────────────────────────────────────
+let _productos    = [];
+let _resumen      = {};
+let _tablaMain    = null;
+let _tablaReab    = null;
+let _cargando     = false;
 
-    const user = ApiClient.getUser();
-    const nameEl = document.getElementById('vendedorNombre');
-    if (nameEl) nameEl.textContent = user.nombre || user.email || 'Vendedor';
+// ── Utilidades ────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const fmt = {
+  moneda : v => `$${Number(v || 0).toLocaleString('es-CO', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`,
+  pct    : v => `${Number(v || 0).toFixed(1)}%`,
+  num    : v => Number(v || 0).toLocaleString('es-CO'),
+  dec    : (v, d = 2) => Number(v || 0).toFixed(d)
+};
 
-    restoreFilters();
-    setupIdleDetection();
-    await loadDashboard();
-    startSmartRefresh();
-  }
+async function fetchAuth(url) {
+  const res = await fetch(API_BASE + url, {
+    headers: { 'Authorization': 'Bearer ' + _token, 'Content-Type': 'application/json' }
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+  return res.json();
+}
 
-  // ── Persistencia de filtros ─────────────────────────────────────────
+// ── Badges ────────────────────────────────────────────────────────────────────
+function badgeEstado(estado) {
+  const map = {
+    'OK'           : ['success', 'check-circle'],
+    'Bajo'         : ['warning', 'exclamation-triangle'],
+    'Crítico'      : ['danger',  'fire'],
+    'Agotado'      : ['dark',    'times-circle'],
+    'Sin rotación' : ['secondary','pause-circle']
+  };
+  const [cls, icon] = map[estado] || ['secondary', 'question-circle'];
+  return `<span class="badge bg-${cls} badge-estado">
+    <i class="fas fa-${icon} me-1"></i>${estado}
+  </span>`;
+}
 
-  function saveFilters() {
-    const f = getFilters();
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(f)); } catch {}
-  }
+function badgeRotacion(clase) {
+  const map = {
+    'Rápido'    : ['success',   'bolt'],
+    'Medio'     : ['warning',   'clock'],
+    'Lento'     : ['danger',    'snail'],
+    'Sin ventas': ['secondary', 'minus']
+  };
+  const [cls, icon] = map[clase] || ['secondary', 'minus'];
+  return `<span class="badge bg-${cls} badge-rot"><i class="fas fa-${icon} me-1"></i>${clase}</span>`;
+}
 
-  function restoreFilters() {
-    try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-      if (saved && saved.fechaInicio && saved.fechaFin) {
-        document.getElementById('filtroFechaInicio').value = saved.fechaInicio;
-        document.getElementById('filtroFechaFin').value = saved.fechaFin;
-        if (saved.agrupacion) document.getElementById('filtroAgrupacion').value = saved.agrupacion;
-        return;
+function badgeMatriz(clasif) {
+  const map = {
+    'Mantener'   : 'badge-mantener',
+    'Promocionar': 'badge-promocionar',
+    'Revisar'    : 'badge-revisar',
+    'Eliminar'   : 'badge-eliminar',
+    'Sin datos'  : 'badge-secondary'
+  };
+  return `<span class="badge ${map[clasif] || 'bg-secondary'}">${clasif}</span>`;
+}
+
+function badgeMargen(pct) {
+  const p = Number(pct);
+  if (p > 20)  return `<span class="badge bg-success">${fmt.pct(p)}</span>`;
+  if (p > 0)   return `<span class="badge bg-warning text-dark">${fmt.pct(p)}</span>`;
+  return `<span class="badge bg-danger">${fmt.pct(p)}</span>`;
+}
+
+// ── Inicialización de la tabla principal ──────────────────────────────────────
+function initTablaMain() {
+  const columns = [
+    {
+      key: 'nombre', label: 'Producto', sortable: true,
+      render: (v, row) => `<div class="prod-cell">
+        ${row.imagen ? `<img src="${row.imagen}" class="prod-thumb me-2" onerror="this.style.display='none'">` : ''}
+        <span class="prod-name">${v}</span>
+      </div>`
+    },
+    { key: 'cantidad_comprada', label: 'Comprado', sortable: true, class: 'text-center',
+      render: v => `<span class="fw-semibold">${fmt.num(v)}</span>`,
+      tooltip: 'Total unidades ingresadas al inventario (ENTRADA FIFO)' },
+    { key: 'cantidad_vendida',  label: 'Vendido',  sortable: true, class: 'text-center',
+      render: v => `<span class="fw-semibold">${fmt.num(v)}</span>`,
+      tooltip: 'Total unidades vendidas (SALIDA FIFO)' },
+    { key: 'stock_actual', label: 'Stock', sortable: true, class: 'text-center',
+      render: (v, row) => {
+        const cls = v === 0 ? 'text-danger' : (v <= 5 ? 'text-warning' : 'text-success');
+        return `<span class="${cls} fw-bold">${fmt.num(v)}</span>`;
+      },
+      tooltip: 'Unidades restantes en lotes FIFO activos' },
+    { key: 'ingresos_brutos', label: 'Ingresos', sortable: true, class: 'text-end',
+      render: v => fmt.moneda(v), tooltip: 'Precio venta × cantidad vendida' },
+    { key: 'costo_total', label: 'Costos', sortable: true, class: 'text-end',
+      render: v => `<span class="text-danger">${fmt.moneda(v)}</span>`,
+      tooltip: 'Costo FIFO real × cantidad vendida' },
+    { key: 'comision_total', label: 'Comisión', sortable: true, class: 'text-end',
+      render: v => `<span class="text-warning">${fmt.moneda(v)}</span>`,
+      tooltip: 'Comisión de plataforma cobrada' },
+    { key: 'ganancia_neta', label: 'Ganancia neta', sortable: true, class: 'text-end',
+      render: v => {
+        const cls = Number(v) > 0 ? 'text-success fw-bold' : 'text-danger fw-bold';
+        return `<span class="${cls}">${fmt.moneda(v)}</span>`;
+      },
+      tooltip: 'Ingresos − Costos FIFO − Comisión' },
+    { key: 'margen_pct', label: 'Margen %', sortable: true, class: 'text-center',
+      render: v => badgeMargen(v),
+      tooltip: '(Ganancia neta / Costo total) × 100' },
+    { key: 'roi', label: 'ROI', sortable: true, class: 'text-center',
+      render: v => badgeMargen(v),
+      tooltip: '(Ganancia neta / Costo total) × 100' },
+    { key: 'rotacion_clase', label: 'Rotación', sortable: true, class: 'text-center',
+      render: (v, row) => {
+        const dias = row.rotacion_dias !== null ? `<br><small class="opacity-75">${fmt.dec(row.rotacion_dias,1)} días/ud</small>` : '';
+        return badgeRotacion(v) + dias;
       }
-    } catch {}
-    setDefaultDates();
-  }
+    },
+    { key: 'estado_inventario', label: 'Estado', sortable: true, class: 'text-center',
+      render: v => badgeEstado(v) }
+  ];
 
-  function setDefaultDates() {
-    const today = new Date();
-    const monthAgo = new Date(today.getFullYear(), today.getMonth() - 1, today.getDate());
-    document.getElementById('filtroFechaInicio').value = monthAgo.toISOString().split('T')[0];
-    document.getElementById('filtroFechaFin').value = today.toISOString().split('T')[0];
-  }
+  _tablaMain = new AdvancedTable({
+    tableId   : 'tablaProductosPrincipal',
+    columns,
+    searchId  : 'buscarProducto',
+    counterId : 'contadorProductos'
+  });
+}
 
-  function getFilters() {
-    return {
-      fechaInicio: document.getElementById('filtroFechaInicio').value,
-      fechaFin: document.getElementById('filtroFechaFin').value,
-      agrupacion: document.getElementById('filtroAgrupacion').value
-    };
-  }
-
-  // ── Auto-refresh inteligente ────────────────────────────────────────
-
-  function setupIdleDetection() {
-    ['mousemove', 'keydown', 'scroll', 'click'].forEach(ev => {
-      document.addEventListener(ev, () => { lastActivity = Date.now(); }, { passive: true });
-    });
-  }
-
-  function startSmartRefresh() {
-    if (refreshTimer) clearInterval(refreshTimer);
-    refreshTimer = setInterval(() => {
-      const isTabVisible = !document.hidden;
-      const isIdle = (Date.now() - lastActivity) > 30000;
-      if (isTabVisible && isIdle) {
-        loadDashboard();
+// ── Inicialización de la tabla de reabastecimiento ────────────────────────────
+function initTablaReab() {
+  const columns = [
+    { key: 'nombre', label: 'Producto', sortable: true,
+      render: (v, row) => `<div class="prod-cell">
+        ${row.imagen ? `<img src="${row.imagen}" class="prod-thumb me-2" onerror="this.style.display='none'">` : ''}
+        <span>${v}</span></div>` },
+    { key: 'stock_actual', label: 'Stock actual', sortable: true, class: 'text-center',
+      render: v => `<strong>${fmt.num(v)}</strong> uds` },
+    { key: 'ventas_por_dia', label: 'Ventas / día', sortable: true, class: 'text-center',
+      render: v => Number(v) > 0 ? `${fmt.dec(v, 2)} uds/día` : '<span class="text-muted">—</span>' },
+    { key: 'dias_para_agotar', label: 'Días restantes', sortable: true, class: 'text-center',
+      render: (v, row) => {
+        if (v === null) return '<span class="text-muted">—</span>';
+        if (v === 0)    return '<span class="badge bg-dark">Agotado</span>';
+        if (v <= 3)     return `<span class="badge bg-danger">${v} días ⚠️</span>`;
+        if (v <= 10)    return `<span class="badge bg-warning text-dark">${v} días</span>`;
+        if (v <= 30)    return `<span class="badge bg-info text-dark">${v} días</span>`;
+        return `<span class="badge bg-success">${v} días</span>`;
       }
-    }, 5 * 60 * 1000);
+    },
+    { key: 'capital_invertido', label: 'Capital retenido', sortable: true, class: 'text-end',
+      render: v => fmt.moneda(v) },
+    { key: 'estado_inventario', label: 'Urgencia', sortable: true, class: 'text-center',
+      render: v => badgeEstado(v) }
+  ];
+
+  _tablaReab = new AdvancedTable({
+    tableId: 'tablaReabastecimiento',
+    columns
+  });
+}
+
+// ── KPI Cards ─────────────────────────────────────────────────────────────────
+function renderKPIs() {
+  const r = _resumen;
+  $('kpiCapitalInmovilizado')?.classList.toggle('kpi-danger', (r.capital_inmovilizado_total || 0) > 0);
+  setText('kpiCapitalInmovilizadoVal',  fmt.moneda(r.capital_inmovilizado_total));
+  setText('kpiMargenPromedioVal',        fmt.pct(r.margen_promedio));
+  setText('kpiProductosRiesgoVal',       r.productos_en_riesgo ?? 0);
+  setText('kpiRoiPromedioVal',           fmt.pct(r.roi_promedio));
+  setText('kpiTotalIngresosVal',         fmt.moneda(r.total_ingresos));
+  setText('kpiTotalGananciaVal',         fmt.moneda(r.total_ganancia_neta));
+  setText('kpiProductosRentablesVal',    r.productos_rentables ?? 0);
+  setText('kpiTotalProductosVal',        r.total_productos ?? 0);
+
+  // Color dinámico margen
+  const kpiMarg = $('kpiMargenPromedioVal');
+  if (kpiMarg) {
+    kpiMarg.className = 'kpi-value ' + (r.margen_promedio > 20 ? 'text-success' : r.margen_promedio > 0 ? 'text-warning' : 'text-danger');
   }
+}
 
-  // ── Carga principal — cada sección independiente ────────────────────
+function setText(id, val) {
+  const el = $(id);
+  if (el) el.textContent = val;
+}
 
-  async function loadDashboard() {
-    const overlay = document.getElementById('loadingOverlay');
-    const btnRefresh = document.getElementById('btnRefresh');
+// ── Rankings ──────────────────────────────────────────────────────────────────
+function renderRankings() {
+  const top5 = (arr) => arr.slice(0, 5);
 
-    btnRefresh.disabled = true;
-    btnRefresh.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> Cargando...';
+  const masVendidos    = top5([..._productos].sort((a, b) => b.cantidad_vendida - a.cantidad_vendida));
+  const masRentables   = top5([..._productos].sort((a, b) => b.ganancia_neta - a.cantidad_vendida).sort((a, b) => b.ganancia_neta - a.ganancia_neta));
+  const peorMargen     = top5([..._productos].filter(p => p.cantidad_vendida > 0).sort((a, b) => a.margen_pct - b.margen_pct));
+  const mayorCapital   = top5([..._productos].sort((a, b) => b.capital_invertido - a.capital_invertido));
 
-    saveFilters();
-    ApiClient.invalidateByPrefix('/reportes/vendedor');
+  renderRankingList('rankingVendidosList', masVendidos,   p => `${fmt.num(p.cantidad_vendida)} uds`, 'purple');
+  renderRankingList('rankingRentablesList', masRentables, p => fmt.moneda(p.ganancia_neta),          'green');
+  renderRankingList('rankingPeorMargenList', peorMargen,  p => badgeMargen(p.margen_pct),             'red');
+  renderRankingList('rankingCapitalList',    mayorCapital, p => fmt.moneda(p.capital_invertido),      'orange');
 
-    const filters = getFilters();
+  // Gráficos de ranking
+  ChartFactory.createBarH(
+    'chartMasVendidos',
+    masVendidos.map(p => truncate(p.nombre, 20)),
+    masVendidos.map(p => p.cantidad_vendida),
+    { color: ChartFactory.PALETTE.purpleA, label: 'Unidades vendidas' }
+  );
+  ChartFactory.createBarH(
+    'chartMasRentables',
+    masRentables.map(p => truncate(p.nombre, 20)),
+    masRentables.map(p => p.ganancia_neta),
+    { color: ChartFactory.PALETTE.greenA, label: 'Ganancia neta', formatter: v => fmt.moneda(v) }
+  );
+}
 
-    // Mostrar loading en cada sección
-    showSectionLoading('kpiRow');
-    showSectionLoading('chartHistorial');
-    showSectionLoading('chartDistribucion');
-    showSectionLoading('chartTopProductos');
-    showSectionLoading('tablaRentables');
-    showSectionLoading('tablaStockMuerto');
-    showSectionLoading('tablaRotacion');
-    overlay.style.display = 'none';
-
-    // Lanzar 5 requests en paralelo con allSettled
-    const [resumenR, historialR, topR, rentablesR, inventarioR] = await Promise.allSettled([
-      ReportesAPI.vendedorResumen(filters),
-      ReportesAPI.vendedorHistorialGanancias(filters),
-      ReportesAPI.vendedorTopProductos(filters),
-      ReportesAPI.vendedorProductosRentables(filters),
-      ReportesAPI.vendedorAnalisisInventario(filters)
-    ]);
-
-    dashData.resumen     = resumenR.status === 'fulfilled' ? resumenR.value : null;
-    dashData.historial   = historialR.status === 'fulfilled' ? historialR.value : null;
-    dashData.topProductos = topR.status === 'fulfilled' ? topR.value : null;
-    dashData.rentables   = rentablesR.status === 'fulfilled' ? rentablesR.value : null;
-    dashData.inventario  = inventarioR.status === 'fulfilled' ? inventarioR.value : null;
-
-    // Renderizar cada sección independiente — si falla una, las demás siguen
-    safeRender('kpiRow', renderKPIs, resumenR);
-    safeRender('chartHistorial', renderHistorialChart, historialR);
-    safeRender('chartDistribucion', renderDistribucionChart, topR);
-    safeRender('chartTopProductos', renderTopProductosChart, topR);
-    safeRender('tablaRentables', renderTablaRentables, rentablesR);
-    safeRender('tablaStockMuerto', () => renderTablaStockMuerto(), inventarioR);
-    safeRender('tablaRotacion', () => renderTablaRotacion(), inventarioR);
-
-    // Alertas — usan datos combinados, toleran nulls
-    renderAlerts();
-
-    btnRefresh.disabled = false;
-    btnRefresh.innerHTML = '<i class="fas fa-sync-alt"></i> Actualizar';
+function renderRankingList(containerId, items, valFn, colorKey) {
+  const el = $(containerId);
+  if (!el) return;
+  if (!items.length) {
+    el.innerHTML = '<li class="list-group-item bg-transparent text-muted">Sin datos</li>';
+    return;
   }
+  el.innerHTML = items.map((p, i) => `
+    <li class="list-group-item bg-transparent border-bottom-subtle d-flex justify-content-between align-items-center py-2">
+      <div class="d-flex align-items-center gap-2">
+        <span class="rank-badge rank-${colorKey}">${i + 1}</span>
+        <span class="text-white small">${truncate(p.nombre, 28)}</span>
+      </div>
+      <span class="fw-semibold small">${valFn(p)}</span>
+    </li>
+  `).join('');
+}
 
-  /**
-   * Ejecuta un render. Si el promise falló, muestra error en esa sección.
-   */
-  function safeRender(containerId, renderFn, settledResult) {
-    if (settledResult && settledResult.status === 'rejected') {
-      showSectionError(containerId, settledResult.reason?.message || 'Error al cargar datos');
-      return;
-    }
-    try {
-      renderFn();
-    } catch (err) {
-      console.error(`Error renderizando ${containerId}:`, err);
-      showSectionError(containerId, 'Error al renderizar: ' + err.message);
-    }
-  }
+function truncate(str, n) {
+  return str && str.length > n ? str.slice(0, n) + '…' : (str || '');
+}
 
-  function showSectionLoading(id) {
-    const el = document.getElementById(id);
+// ── Gráfico de dona — Distribución de rotación ────────────────────────────────
+function renderChartRotacion() {
+  const rapido = _productos.filter(p => p.rotacion_clase === 'Rápido').length;
+  const medio  = _productos.filter(p => p.rotacion_clase === 'Medio').length;
+  const lento  = _productos.filter(p => p.rotacion_clase === 'Lento').length;
+  const sinV   = _productos.filter(p => p.rotacion_clase === 'Sin ventas').length;
+
+  ChartFactory.createDonut(
+    'chartRotacion',
+    ['Rápido', 'Medio', 'Lento', 'Sin ventas'],
+    [rapido, medio, lento, sinV],
+    [ChartFactory.PALETTE.green, ChartFactory.PALETTE.orange, ChartFactory.PALETTE.red, ChartFactory.PALETTE.gray]
+  );
+}
+
+// ── Gráfico de dona — Distribución de estado ──────────────────────────────────
+function renderChartEstado() {
+  const counts = {};
+  _productos.forEach(p => { counts[p.estado_inventario] = (counts[p.estado_inventario] || 0) + 1; });
+  const labels  = Object.keys(counts);
+  const values  = Object.values(counts);
+  const palette = labels.map(l => ChartFactory.colorPorEstado(l));
+
+  ChartFactory.createDonut('chartEstadoInventario', labels, values, palette);
+}
+
+// ── Matriz Estratégica ────────────────────────────────────────────────────────
+function renderMatriz() {
+  const cuadrantes = { Mantener: [], Promocionar: [], Revisar: [], Eliminar: [], 'Sin datos': [] };
+  _productos.forEach(p => (cuadrantes[p.matriz_clasificacion] || cuadrantes['Sin datos']).push(p));
+
+  const renderQ = (id, items, fn) => {
+    const el = $(id);
     if (!el) return;
-    // Solo inyectar loading si es un contenedor de tabla/kpi (no canvas)
-    if (el.tagName === 'CANVAS') {
-      ChartFactory.renderChartLoading(id);
+    if (!items.length) { el.innerHTML = '<p class="text-muted small text-center my-2">Sin productos</p>'; return; }
+    el.innerHTML = items.map(p => `
+      <div class="matriz-item d-flex justify-content-between align-items-center py-1 border-bottom border-opacity-10">
+        <span class="small text-truncate me-2" style="max-width:140px">${p.nombre}</span>
+        <div class="d-flex gap-1 flex-shrink-0">
+          ${badgeMargen(p.margen_pct)}
+        </div>
+      </div>
+    `).join('');
+  };
+
+  renderQ('matrizMantener',    cuadrantes['Mantener'],    p => p);
+  renderQ('matrizPromocionar', cuadrantes['Promocionar'], p => p);
+  renderQ('matrizRevisar',     cuadrantes['Revisar'],     p => p);
+  renderQ('matrizEliminar',    cuadrantes['Eliminar'],    p => p);
+
+  // Contadores
+  ['Mantener','Promocionar','Revisar','Eliminar'].forEach(k => {
+    setText(`cnt${k}`, cuadrantes[k].length);
+  });
+
+  // Gráfico de burbujas
+  const colores = {
+    'Mantener':    ChartFactory.PALETTE.greenA,
+    'Promocionar': ChartFactory.PALETTE.blueA,
+    'Revisar':     ChartFactory.PALETTE.orangeA,
+    'Eliminar':    ChartFactory.PALETTE.redA
+  };
+
+  const datasets = Object.entries(cuadrantes)
+    .filter(([k]) => k !== 'Sin datos')
+    .map(([k, items]) => ({
+      label: k,
+      backgroundColor: colores[k] || ChartFactory.PALETTE.gray,
+      data: items.map(p => ({
+        x      : p.cantidad_vendida,
+        y      : p.margen_pct,
+        r      : Math.max(6, Math.min(30, Math.sqrt(p.capital_invertido || 1) / 2)),
+        r_raw  : p.capital_invertido,
+        nombre : p.nombre
+      }))
+    }));
+
+  ChartFactory.createBubble('chartMatrizBurbuja', datasets);
+}
+
+// ── Problemas y Recomendaciones ───────────────────────────────────────────────
+function renderProblemasYRecomendaciones() {
+  // Alertas globales
+  const alertas = [];
+  const conMargenNeg  = _productos.filter(p => p.margen_pct <= 0 && p.cantidad_vendida > 0);
+  const agotados      = _productos.filter(p => p.estado_inventario === 'Agotado');
+  const criticos      = _productos.filter(p => p.estado_inventario === 'Crítico');
+  const sinRotacion   = _productos.filter(p => p.rotacion_clase === 'Lento' && p.stock_actual > 10);
+  const sinVentas     = _productos.filter(p => p.cantidad_vendida === 0 && p.stock_actual > 0);
+  const capitalMuerto = sinVentas.reduce((s, p) => s + (p.capital_invertido || 0), 0);
+
+  if (conMargenNeg.length)
+    alertas.push({ nivel: 'danger',  icono: 'exclamation-triangle', titulo: `${conMargenNeg.length} producto(s) con margen negativo o cero`,
+      desc: `Estos productos están vendiendo por debajo del costo. Sube el precio o negocia mejor costo.` });
+  if (criticos.length)
+    alertas.push({ nivel: 'danger',  icono: 'fire', titulo: `${criticos.length} producto(s) en estado CRÍTICO (stock < 3 días)`,
+      desc: `Reabastecer urgentemente para no perder ventas.` });
+  if (agotados.length)
+    alertas.push({ nivel: 'warning', icono: 'times-circle', titulo: `${agotados.length} producto(s) agotado(s) con historial de ventas`,
+      desc: `Productos que se vendían bien y ya no tienen stock disponible.` });
+  if (sinRotacion.length)
+    alertas.push({ nivel: 'warning', icono: 'warehouse', titulo: `${sinRotacion.length} producto(s) con rotación lenta y alto stock`,
+      desc: `Considera descuentos o promociones para liberar capital.` });
+  if (sinVentas.length && capitalMuerto > 0)
+    alertas.push({ nivel: 'info',    icono: 'lock', titulo: `Capital inmovilizado en productos sin venta: ${fmt.moneda(capitalMuerto)}`,
+      desc: `${sinVentas.length} producto(s) con stock pero sin ventas en el período. Evalúa liquidar o promocionar.` });
+
+  const elAlertas = $('alertasProblemas');
+  if (elAlertas) {
+    if (!alertas.length) {
+      elAlertas.innerHTML = `<div class="alert alert-success"><i class="fas fa-check-circle me-2"></i>¡Sin problemas detectados en el período seleccionado!</div>`;
     } else {
-      el.innerHTML = '<div class="dash-table-loading"><div class="dash-spinner-sm"></div><span>Cargando...</span></div>';
-    }
-  }
-
-  function showSectionError(id, message) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    if (el.tagName === 'CANVAS') {
-      ChartFactory.renderChartEmpty(id, message);
-    } else {
-      el.innerHTML = `
-        <div class="dash-alert" style="background:rgba(220,53,69,0.08); border-left:4px solid #dc3545; margin:0.5rem 0;">
-          <div class="dash-alert-icon" style="color:#dc3545"><i class="fas fa-exclamation-circle"></i></div>
-          <div class="dash-alert-body">
-            <div class="dash-alert-title" style="color:#dc3545">Error</div>
-            <div class="dash-alert-message">${ApiClient.escapeHtml(message)}</div>
+      elAlertas.innerHTML = alertas.map(a => `
+        <div class="alert alert-${a.nivel} d-flex gap-3 align-items-start">
+          <i class="fas fa-${a.icono} fa-lg mt-1 flex-shrink-0"></i>
+          <div>
+            <div class="fw-semibold">${a.titulo}</div>
+            <div class="small opacity-75 mt-1">${a.desc}</div>
           </div>
-        </div>`;
+        </div>
+      `).join('');
     }
   }
 
-  // ── KPIs — Ticket promedio, ROI, Margen promedio ────────────────────
-
-  function renderKPIs() {
-    const r = dashData.resumen || {};
-    const historial = normalizeArray(dashData.historial);
-
-    const totalVendido = Number(r.total_vendido) || 0;
-    const gananciaNeta = Number(r.ganancia_neta) || 0;
-    const totalCosto   = Number(r.total_costo) || 0;
-    const totalPedidos = Number(r.total_pedidos) || 0;
-    const totalComisiones = Number(r.total_comisiones) || 0;
-
-    // Ticket promedio = ventas / pedidos
-    const ticketPromedio = totalPedidos > 0 ? totalVendido / totalPedidos : 0;
-
-    // ROI = ganancia_neta / costo_total * 100
-    const roi = totalCosto > 0 ? (gananciaNeta / totalCosto) * 100 : 0;
-
-    // Margen promedio = ganancia_neta / total_vendido * 100
-    const margenPromedio = totalVendido > 0 ? (gananciaNeta / totalVendido) * 100 : 0;
-
-    // Cambio % comparando últimos 2 periodos del historial
-    let cambioGanancias = null;
-    if (historial.length >= 2) {
-      const last = Number(historial[historial.length - 1].ganancia_neta) || 0;
-      const prev = Number(historial[historial.length - 2].ganancia_neta) || 0;
-      if (prev > 0) cambioGanancias = ((last - prev) / prev) * 100;
-    }
-
-    const cards = [
-      {
-        label: 'Ganancia Neta',
-        value: ApiClient.formatCurrency(gananciaNeta),
-        rawValue: gananciaNeta,
-        icon: 'fas fa-piggy-bank',
-        color: 'success',
-        change: cambioGanancias,
-        subtitle: `${ApiClient.formatCurrency(totalComisiones)} en comisiones`
-      },
-      {
-        label: 'Ticket Promedio',
-        value: ApiClient.formatCurrency(ticketPromedio),
-        rawValue: ticketPromedio,
-        icon: 'fas fa-receipt',
-        color: 'primary',
-        subtitle: `${ApiClient.formatNumber(totalPedidos)} pedidos | ${ApiClient.formatCurrency(totalVendido)} vendido`
-      },
-      {
-        label: 'ROI',
-        value: roi.toFixed(1) + '%',
-        rawValue: roi,
-        icon: 'fas fa-chart-line',
-        color: roi >= 20 ? 'success' : (roi >= 0 ? 'warning' : 'danger'),
-        subtitle: `Retorno sobre ${ApiClient.formatCurrency(totalCosto)} invertido`
-      },
-      {
-        label: 'Margen Neto',
-        value: margenPromedio.toFixed(1) + '%',
-        rawValue: margenPromedio,
-        icon: 'fas fa-percentage',
-        color: margenPromedio >= 25 ? 'success' : (margenPromedio >= 10 ? 'warning' : 'danger'),
-        subtitle: r.inventario ? `${r.inventario.unidades_en_stock || 0} unid. en stock` : ''
-      }
-    ];
-
-    KpiCard.renderKpiRow('kpiRow', cards);
-  }
-
-  // ── Gráficas ────────────────────────────────────────────────────────
-
-  function renderHistorialChart() {
-    const historial = normalizeArray(dashData.historial);
-    ChartFactory.removeChartLoading('chartHistorial');
-
-    if (historial.length === 0) {
-      ChartFactory.renderChartEmpty('chartHistorial', 'No hay datos de ganancias en este periodo');
-      return;
-    }
-
-    ChartFactory.clearChartEmpty('chartHistorial');
-    ChartFactory.createLineChart('chartHistorial', {
-      labels: historial.map(h => formatPeriodo(h.periodo)),
-      datasets: [
-        { label: 'Ganancia Neta', data: historial.map(h => Number(h.ganancia_neta) || 0), color: '#28a745' },
-        { label: 'Ingresos Brutos', data: historial.map(h => Number(h.ingresos_brutos) || 0), color: '#667eea' },
-        { label: 'Comisiones', data: historial.map(h => Number(h.comision_total) || 0), color: '#ffc107' }
-      ],
-      yPrefix: '$',
-      fill: false
+  // Recomendaciones por producto
+  const conRecs = _productos.filter(p => p.recomendaciones && p.recomendaciones.length > 0)
+    .sort((a, b) => {
+      const prio = { critico: 0, urgente: 1, medio: 2, oportunidad: 3, positivo: 4 };
+      const minA = Math.min(...a.recomendaciones.map(r => prio[r.tipo] ?? 5));
+      const minB = Math.min(...b.recomendaciones.map(r => prio[r.tipo] ?? 5));
+      return minA - minB;
     });
+
+  const elRecs = $('recomendacionesContainer');
+  if (!elRecs) return;
+
+  if (!conRecs.length) {
+    elRecs.innerHTML = '<p class="text-muted text-center mt-3">No hay recomendaciones en este período.</p>';
+    return;
   }
 
-  function renderDistribucionChart() {
-    const topProds = normalizeArray(dashData.topProductos);
-    ChartFactory.removeChartLoading('chartDistribucion');
+  const tipoConfig = {
+    critico    : { cls: 'rec-critico',     icono: 'bomb',             label: 'CRÍTICO' },
+    urgente    : { cls: 'rec-urgente',     icono: 'exclamation',      label: 'URGENTE' },
+    medio      : { cls: 'rec-medio',       icono: 'info-circle',      label: 'ATENCIÓN' },
+    oportunidad: { cls: 'rec-oportunidad', icono: 'lightbulb',        label: 'OPORTUNIDAD' },
+    positivo   : { cls: 'rec-positivo',    icono: 'star',             label: 'POSITIVO' }
+  };
 
-    if (topProds.length === 0) {
-      ChartFactory.renderChartEmpty('chartDistribucion', 'Sin datos de distribución');
-      return;
-    }
-
-    ChartFactory.clearChartEmpty('chartDistribucion');
-    const top5 = topProds.slice(0, 6);
-    ChartFactory.createPieChart('chartDistribucion', {
-      labels: top5.map(p => truncate(p.nombre, 20)),
-      data: top5.map(p => Number(p.ganancia_neta) || 0),
-      type: 'doughnut'
-    });
-  }
-
-  function renderTopProductosChart() {
-    const topProds = normalizeArray(dashData.topProductos);
-    ChartFactory.removeChartLoading('chartTopProductos');
-
-    if (topProds.length === 0) {
-      ChartFactory.renderChartEmpty('chartTopProductos', 'Sin datos de productos vendidos');
-      return;
-    }
-
-    ChartFactory.clearChartEmpty('chartTopProductos');
-    const top10 = topProds.slice(0, 10);
-    ChartFactory.createBarChart('chartTopProductos', {
-      labels: top10.map(p => truncate(p.nombre, 25)),
-      datasets: [{
-        label: 'Unidades Vendidas',
-        data: top10.map(p => Number(p.unidades_vendidas) || 0),
-        color: '#667eea'
-      }],
-      horizontal: true
-    });
-  }
-
-  // ── Tablas con drill-down ───────────────────────────────────────────
-
-  function renderTablaRentables() {
-    const data = normalizeArray(dashData.rentables);
-    tables.rentables = DataTable.createDataTable('tablaRentables', {
-      columns: [
-        { key: 'nombre', label: 'Producto', sortable: true },
-        { key: 'ganancia_neta', label: 'Ganancia Neta', type: 'currency', align: 'right', sortable: true },
-        { key: 'margen_pct', label: 'Margen', align: 'right', sortable: true,
-          format: (v) => {
-            const n = Number(v) || 0;
-            const cls = n >= 30 ? 'dash-badge-success' : (n >= 10 ? 'dash-badge-warning' : 'dash-badge-danger');
-            return `<span class="dash-badge ${cls}">${n.toFixed(1)}%</span>`;
-          }
-        },
-        { key: 'unidades_vendidas', label: 'Vendidos', type: 'number', align: 'right', sortable: true },
-        { key: 'comision_total', label: 'Comisión', type: 'currency', align: 'right', sortable: true }
-      ],
-      data: data,
-      searchable: true,
-      searchPlaceholder: 'Buscar producto...',
-      pageSize: 5,
-      emptyMessage: 'Sin productos rentables en este periodo',
-      emptyIcon: 'fas fa-gem',
-      rowClick: (row) => showDrillDown(row)
-    });
-  }
-
-  function renderTablaStockMuerto() {
-    const inv = dashData.inventario || {};
-    const data = inv.stock_muerto || [];
-
-    tables.stockMuerto = DataTable.createDataTable('tablaStockMuerto', {
-      columns: [
-        { key: 'nombre', label: 'Producto', sortable: true },
-        { key: 'stock', label: 'Stock', type: 'number', align: 'right', sortable: true },
-        { key: 'capital_retenido', label: 'Capital Retenido', type: 'currency', align: 'right', sortable: true,
-          format: (v) => {
-            const n = Number(v) || 0;
-            const cls = n >= 500 ? 'dash-text-danger dash-fw-bold' : '';
-            return `<span class="${cls}">${ApiClient.formatCurrency(n)}</span>`;
-          }
-        },
-        { key: 'precio', label: 'P. Venta', type: 'currency', align: 'right', sortable: true },
-        { key: 'costo_compra', label: 'Costo', type: 'currency', align: 'right', sortable: true }
-      ],
-      data: data,
-      searchable: true,
-      searchPlaceholder: 'Buscar producto...',
-      pageSize: 5,
-      emptyMessage: 'Sin stock muerto — todos tus productos rotan bien!',
-      emptyIcon: 'fas fa-check-circle'
-    });
-  }
-
-  function renderTablaRotacion() {
-    const inv = dashData.inventario || {};
-    const data = inv.mayor_rotacion || [];
-
-    tables.rotacion = DataTable.createDataTable('tablaRotacion', {
-      columns: [
-        { key: 'nombre', label: 'Producto', sortable: true },
-        { key: 'unidades_vendidas', label: 'Vendidas', type: 'number', align: 'right', sortable: true },
-        { key: 'stock', label: 'Stock', type: 'number', align: 'right', sortable: true },
-        { key: 'indice_rotacion', label: 'Rotación', align: 'center', sortable: true,
-          format: (v) => {
-            const n = Number(v) || 0;
-            if (n >= 2) return '<span class="dash-badge dash-badge-success"><i class="fas fa-circle me-1" style="font-size:0.5rem"></i>Alta ' + n.toFixed(1) + '</span>';
-            if (n >= 1) return '<span class="dash-badge dash-badge-warning"><i class="fas fa-circle me-1" style="font-size:0.5rem"></i>Media ' + n.toFixed(1) + '</span>';
-            return '<span class="dash-badge dash-badge-danger"><i class="fas fa-circle me-1" style="font-size:0.5rem"></i>Baja ' + n.toFixed(1) + '</span>';
-          }
-        },
-        { key: 'pct_conversion_inventario', label: 'Conversión', align: 'right', sortable: true,
-          format: (v) => {
-            const n = Number(v) || 0;
-            return `<span class="dash-badge dash-badge-info">${n.toFixed(1)}%</span>`;
-          }
-        },
-        { key: 'precio', label: 'Precio', type: 'currency', align: 'right', sortable: true }
-      ],
-      data: data,
-      searchable: true,
-      searchPlaceholder: 'Buscar producto...',
-      pageSize: 8,
-      emptyMessage: 'Sin datos de rotación en este periodo',
-      emptyIcon: 'fas fa-fire',
-      rowClick: (row) => showDrillDown(row)
-    });
-  }
-
-  // ── Drill-down modal ────────────────────────────────────────────────
-
-  function showDrillDown(row) {
-    if (!row || !row.nombre) return;
-    let modal = document.getElementById('drillDownModal');
-    if (!modal) {
-      modal = document.createElement('div');
-      modal.id = 'drillDownModal';
-      modal.className = 'modal fade';
-      modal.tabIndex = -1;
-      modal.innerHTML = `
-        <div class="modal-dialog modal-lg">
-          <div class="modal-content" style="background:var(--dash-surface); border:none; border-radius:var(--dash-radius);">
-            <div class="modal-header" style="border-bottom:1px solid var(--dash-border);">
-              <h5 class="modal-title" id="drillDownTitle"></h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body" id="drillDownBody"></div>
-          </div>
-        </div>`;
-      document.body.appendChild(modal);
-    }
-
-    document.getElementById('drillDownTitle').innerHTML =
-      `<i class="fas fa-search-plus me-2" style="color:var(--dash-primary)"></i>${ApiClient.escapeHtml(row.nombre)}`;
-
-    const body = document.getElementById('drillDownBody');
-    const fields = Object.entries(row).filter(([k]) => k !== 'imagen');
-    const labels = {
-      id_producto: 'ID Producto', nombre: 'Nombre', unidades_vendidas: 'Unidades Vendidas',
-      ingresos_brutos: 'Ingresos Brutos', ganancia_neta: 'Ganancia Neta', ganancia_bruta: 'Ganancia Bruta',
-      comision_total: 'Comisión Total', margen_pct: 'Margen %', costo_total: 'Costo Total',
-      stock: 'Stock Actual', precio: 'Precio Venta', costo_compra: 'Costo Compra',
-      capital_retenido: 'Capital Retenido', indice_rotacion: 'Índice Rotación',
-      pct_conversion_inventario: '% Conversión', pedidos_distintos: 'Pedidos Distintos',
-      unidades_compradas: 'Unidades Compradas'
-    };
-
-    body.innerHTML = `
-      <div class="row g-3">
-        ${fields.map(([k, v]) => {
-          const label = labels[k] || k.replace(/_/g, ' ');
-          const isMoney = ['ingresos_brutos','ganancia_neta','ganancia_bruta','comision_total',
-            'costo_total','precio','costo_compra','capital_retenido'].includes(k);
-          const isPct = ['margen_pct','pct_conversion_inventario'].includes(k);
-          const display = isMoney ? ApiClient.formatCurrency(v) : isPct ? Number(v).toFixed(1) + '%' : v;
-          return `<div class="col-md-4 col-6">
-            <div style="background:#f8f9fa; padding:0.75rem; border-radius:8px;">
-              <div style="font-size:0.7rem; color:var(--dash-muted); text-transform:uppercase; letter-spacing:0.5px;">${ApiClient.escapeHtml(label)}</div>
-              <div style="font-size:1.1rem; font-weight:600; color:var(--dash-text);">${display}</div>
-            </div>
-          </div>`;
-        }).join('')}
+  elRecs.innerHTML = conRecs.map(p => {
+    const recs = p.recomendaciones.map(r => {
+      const cfg = tipoConfig[r.tipo] || tipoConfig.medio;
+      return `<div class="rec-item ${cfg.cls}">
+        <i class="fas fa-${cfg.icono} me-2"></i>
+        <span class="rec-label">${cfg.label}</span>
+        ${r.mensaje}
       </div>`;
+    }).join('');
+    return `
+      <div class="rec-card">
+        <div class="rec-card-header">
+          <i class="fas fa-box me-2 opacity-75"></i>
+          <strong>${p.nombre}</strong>
+          <div class="ms-auto d-flex gap-1">
+            ${badgeMargen(p.margen_pct)}
+            ${badgeEstado(p.estado_inventario)}
+          </div>
+        </div>
+        <div class="rec-card-body">${recs}</div>
+      </div>`;
+  }).join('');
+}
 
-    const bsModal = new bootstrap.Modal(modal);
-    bsModal.show();
+// ── Reabastecimiento ──────────────────────────────────────────────────────────
+function renderReabastecimiento() {
+  const conStock = _productos.filter(p => p.stock_actual > 0 || p.estado_inventario === 'Agotado');
+  const ordenado = [...conStock].sort((a, b) => {
+    // Agotados primero, luego por días restantes asc
+    if (a.estado_inventario === 'Agotado' && b.estado_inventario !== 'Agotado') return -1;
+    if (b.estado_inventario === 'Agotado' && a.estado_inventario !== 'Agotado') return 1;
+    if (a.dias_para_agotar === null && b.dias_para_agotar === null) return 0;
+    if (a.dias_para_agotar === null) return 1;
+    if (b.dias_para_agotar === null) return -1;
+    return a.dias_para_agotar - b.dias_para_agotar;
+  });
+
+  _tablaReab?.load(ordenado);
+}
+
+// ── Carga de datos ────────────────────────────────────────────────────────────
+async function cargarDatos() {
+  if (_cargando) return;
+  _cargando = true;
+
+  const fi = $('fechaInicio')?.value || '';
+  const ff = $('fechaFin')?.value   || '';
+  const params = new URLSearchParams();
+  if (fi) params.set('fecha_inicio', fi);
+  if (ff) params.set('fecha_fin',    ff);
+
+  mostrarLoading(true);
+  setError('');
+
+  try {
+    const res  = await fetchAuth(`/reportes/vendedor/productos-detalle?${params}`);
+    const data = res.data;
+
+    _productos = data.productos  || [];
+    _resumen   = data.resumen    || {};
+
+    renderKPIs();
+    _tablaMain?.load(_productos);
+    renderRankings();
+    renderChartRotacion();
+    renderChartEstado();
+    renderMatriz();
+    renderProblemasYRecomendaciones();
+    renderReabastecimiento();
+
+    setText('ultimaActualizacion', new Date().toLocaleTimeString('es-CO'));
+
+  } catch (err) {
+    console.error('[Dashboard Vendedor]', err);
+    setError('Error al cargar los datos: ' + (err.message || 'Error desconocido'));
+  } finally {
+    _cargando = false;
+    mostrarLoading(false);
   }
+}
 
-  // ── Alertas ─────────────────────────────────────────────────────────
+function mostrarLoading(show) {
+  const el = $('loadingOverlay');
+  if (el) el.style.display = show ? 'flex' : 'none';
+  const btn = $('btnActualizar');
+  if (btn) { btn.disabled = show; btn.innerHTML = show
+    ? '<i class="fas fa-spinner fa-spin me-1"></i>Cargando...'
+    : '<i class="fas fa-sync-alt me-1"></i>Actualizar'; }
+}
 
-  function renderAlerts() {
-    const historial = normalizeArray(dashData.historial);
-    const alerts = AlertsEngine.analyzeVendedor({
-      resumen: dashData.resumen,
-      inventario: dashData.inventario,
-      historial: historial
+function setError(msg) {
+  const el = $('errorBanner');
+  if (!el) return;
+  el.style.display = msg ? 'block' : 'none';
+  el.textContent = msg;
+}
+
+// ── Filtros de la tabla principal ─────────────────────────────────────────────
+function setupFiltros() {
+  $('filtroRotacion')?.addEventListener('change', e => _tablaMain?.setFilter('rotacion_clase',   e.target.value));
+  $('filtroEstado')?.addEventListener('change',   e => _tablaMain?.setFilter('estado_inventario', e.target.value));
+  $('filtroMatriz')?.addEventListener('change',   e => _tablaMain?.setFilter('matriz_clasificacion', e.target.value));
+
+  $('btnLimpiarFiltros')?.addEventListener('click', () => {
+    ['filtroRotacion','filtroEstado','filtroMatriz'].forEach(id => {
+      const el = $(id); if (el) el.value = '';
     });
-    AlertsEngine.renderAlerts('alertsContainer', alerts);
-  }
+    const buscar = $('buscarProducto'); if (buscar) buscar.value = '';
+    _tablaMain?.setFilter('rotacion_clase', '');
+    _tablaMain?.setFilter('estado_inventario', '');
+    _tablaMain?.setFilter('matriz_clasificacion', '');
+    _tablaMain?.setSearch('');
+  });
+}
 
-  // ── Helpers ─────────────────────────────────────────────────────────
+// ── Fechas por defecto ────────────────────────────────────────────────────────
+function initFechas() {
+  const hoy  = new Date();
+  const hace = new Date(hoy.getFullYear(), hoy.getMonth() - 1, hoy.getDate());
+  const fi = $('fechaInicio');
+  const ff = $('fechaFin');
+  if (fi) fi.value = hace.toISOString().slice(0, 10);
+  if (ff) ff.value = hoy.toISOString().slice(0, 10);
 
-  function normalizeArray(data) {
-    if (!data) return [];
-    if (Array.isArray(data)) return data;
-    if (data.data && Array.isArray(data.data)) return data.data;
-    return [];
-  }
+  $('btnActualizar')?.addEventListener('click', cargarDatos);
+}
 
-  function formatPeriodo(p) {
-    if (!p) return '';
-    const str = String(p);
-    if (/^\d{4}-\d{2}$/.test(str)) {
-      const [y, m] = str.split('-');
-      const meses = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-      return meses[parseInt(m) - 1] + ' ' + y.slice(2);
-    }
-    if (/^\d{4}-W\d{2}$/.test(str)) {
-      return 'Sem ' + str.split('-W')[1] + ' ' + str.split('-')[0].slice(2);
-    }
-    if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
-      const d = new Date(str);
-      return d.toLocaleDateString('es-ES', { day: '2-digit', month: 'short' });
-    }
-    return str;
-  }
+// ── Nombre de usuario ─────────────────────────────────────────────────────────
+function initUserInfo() {
+  const nombre = _user.nombre || _user.email || 'Vendedor';
+  setText('vendedorNombre', nombre);
+  const avatar = $('userAvatar');
+  if (avatar) avatar.textContent = nombre[0]?.toUpperCase() || 'V';
+}
 
-  function truncate(str, maxLen) {
-    if (!str) return '';
-    return str.length > maxLen ? str.substring(0, maxLen) + '...' : str;
-  }
+// ── Cerrar sesión ─────────────────────────────────────────────────────────────
+window.cerrarSesion = function () {
+  localStorage.removeItem('token');
+  localStorage.removeItem('user');
+  location.href = '../login.html';
+};
 
-  // ── Refresh (llamado desde botón) ───────────────────────────────────
-
-  async function refresh() {
-    await loadDashboard();
-  }
-
-  global.DashVendedor = { refresh };
-  document.addEventListener('DOMContentLoaded', init);
-
-})(window);
+// ── Arranque ──────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  initUserInfo();
+  initFechas();
+  initTablaMain();
+  initTablaReab();
+  setupFiltros();
+  cargarDatos();
+});
