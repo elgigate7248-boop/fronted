@@ -717,6 +717,13 @@
             </div>
           </div>
           <div class="col-lg-3 col-md-6">
+            <div class="quick-action-card" onclick="document.getElementById('estadisticas-tab').click()">
+              <i class="fas fa-chart-line fa-2x mb-2"></i>
+              <div class="fw-bold">Estadísticas</div>
+              <small>Ver análisis</small>
+            </div>
+          </div>
+          <div class="col-lg-3 col-md-6">
             <div class="quick-action-card" onclick="location.href='dashboard/dashboard-vendedor.html'">
               <i class="fas fa-tachometer-alt fa-2x mb-2"></i>
               <div class="fw-bold">Dashboard Analytics</div>
@@ -724,10 +731,10 @@
             </div>
           </div>
           <div class="col-lg-3 col-md-6">
-            <div class="quick-action-card" onclick="document.getElementById('perfil-tab').click()">
-              <i class="fas fa-user fa-2x mb-2"></i>
-              <div class="fw-bold">Mi Perfil</div>
-              <small>Editar cuenta</small>
+            <div class="quick-action-card" onclick="location.href='trazabilidad.html'" style="border:1px solid rgba(42,82,152,0.4); background:linear-gradient(135deg,rgba(30,60,114,0.35),rgba(42,82,152,0.25))">
+              <i class="fas fa-search fa-2x mb-2" style="color:#63b3ed"></i>
+              <div class="fw-bold">Trazabilidad FIFO</div>
+              <small>Audit&oacute;ria de lotes</small>
             </div>
           </div>
         </div>
@@ -840,9 +847,10 @@
                 <select class="form-select" id="filtroEstadoPedido">
                   <option value="">Todos los estados</option>
                   <option value="pendiente">Pendiente</option>
-                  <option value="procesando">Procesando</option>
-                  <option value="enviado">Enviado</option>
-                  <option value="completado">Completado</option>
+                  <option value="confirmado">Confirmado</option>
+                  <option value="preparando">Preparando</option>
+                  <option value="en camino">En camino</option>
+                  <option value="entregado">Entregado</option>
                   <option value="cancelado">Cancelado</option>
                 </select>
               </div>
@@ -936,6 +944,17 @@
 
       <!-- Inventario Tab -->
       <div class="tab-pane fade" id="inventario" role="tabpanel">
+        <!-- Acceso a Trazabilidad FIFO -->
+        <div class="alert d-flex align-items-center gap-3 mb-4" style="background:linear-gradient(135deg,rgba(30,60,114,0.35),rgba(42,82,152,0.2));border:1px solid rgba(42,82,152,0.4);border-radius:12px;color:#e0e0e0">
+          <i class="fas fa-search fa-lg" style="color:#63b3ed;flex-shrink:0"></i>
+          <div class="flex-grow-1">
+            <div class="fw-bold">Trazabilidad FIFO &mdash; Audit&oacute;ria completa de lotes</div>
+            <div class="small opacity-75">Ve exactamente qu&eacute; compra se vendi&oacute; en qu&eacute; pedido, qu&eacute; lote tiene stock y cu&aacute;l fue el costo real de cada unidad.</div>
+          </div>
+          <a href="trazabilidad.html" class="btn btn-sm btn-primary flex-shrink-0" style="background:#2a5298;border:none;white-space:nowrap">
+            <i class="fas fa-microscope me-1"></i>Abrir Trazabilidad
+          </a>
+        </div>
         <!-- Resumen financiero cards -->
         <div class="row g-4 mb-4">
           <div class="col-md-3">
@@ -943,7 +962,7 @@
               <div class="card-body">
                 <h6 class="card-title mb-1"><i class="fas fa-coins me-1"></i>Ganancia Neta</h6>
                 <h3 class="mb-0" id="invGananciaNeta">$0</h3>
-                <small class="opacity-75">Descontada comision</small>
+                <small class="opacity-75">Descontada comisi&oacute;n</small>
               </div>
             </div>
           </div>
@@ -959,7 +978,7 @@
           <div class="col-md-3">
             <div class="card stat-card bg-warning text-white">
               <div class="card-body">
-                <h6 class="card-title mb-1"><i class="fas fa-percentage me-1"></i>Comision Plataforma</h6>
+                <h6 class="card-title mb-1"><i class="fas fa-percentage me-1"></i>Comisi&oacute;n Plataforma</h6>
                 <h3 class="mb-0" id="invComisionTotal">$0</h3>
                 <small class="opacity-75">Total retenido</small>
               </div>
@@ -970,7 +989,7 @@
               <div class="card-body">
                 <h6 class="card-title mb-1"><i class="fas fa-truck-loading me-1"></i>Invertido</h6>
                 <h3 class="mb-0" id="invTotalInvertido">$0</h3>
-                <small class="opacity-75">Compras / produccion</small>
+                <small class="opacity-75">Compras / producci&oacute;n</small>
               </div>
             </div>
           </div>
@@ -1366,12 +1385,12 @@
             </div>
             <div class="row">
               <div class="col-md-6 mb-3">
-                <label class="form-label"><i class="fas fa-dollar-sign me-1 text-success"></i>Costo de compra/produccion</label>
+                <label class="form-label"><i class="fas fa-dollar-sign me-1 text-success"></i>Costo de compra/producci&oacute;n</label>
                 <input type="number" class="form-control" id="productoCostoCompra" step="0.01" min="0" placeholder="Ej: 10.00">
-                <div class="form-text">Cuanto te cuesta producir o comprar una unidad</div>
+                <div class="form-text">Cu&aacute;nto te cuesta producir o comprar una unidad</div>
               </div>
               <div class="col-md-6 mb-3">
-                <label class="form-label"><i class="fas fa-percentage me-1 text-warning"></i>Comision plataforma (%)</label>
+                <label class="form-label"><i class="fas fa-percentage me-1 text-warning"></i>Comisi&oacute;n plataforma (%)</label>
                 <input type="number" class="form-control" id="productoComision" step="0.1" min="0" max="100" value="5" placeholder="5">
                 <div class="form-text">Porcentaje que cobra la plataforma (default 5%)</div>
               </div>
